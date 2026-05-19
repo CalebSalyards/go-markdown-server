@@ -93,6 +93,23 @@ func (s *Server) handleMarkdown(w http.ResponseWriter, r *http.Request) {
         http.NotFound(w, r)
         return
     }
+
+    // Handle favicon requests
+    if urlPath == "favicon.ico" {
+        faviconPath := filepath.Join(s.contentDir, "favicon.ico")
+        // Security: Ensure the resolved path is still within content directory
+        if !s.isPathSafe(faviconPath) {
+            http.Error(w, "Invalid path", http.StatusBadRequest)
+            return
+        }
+        if _, err := os.Stat(faviconPath); err == nil {
+            w.Header().Set("Content-Type", "image/x-icon")
+            http.ServeFile(w, r, faviconPath)
+            return
+        }
+        http.NotFound(w, r)
+        return
+    }
     
     // Add .md extension if not present and not a directory
     if !strings.HasSuffix(urlPath, ".md") && !strings.HasSuffix(urlPath, "/") {
