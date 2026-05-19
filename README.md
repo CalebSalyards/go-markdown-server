@@ -23,8 +23,8 @@ go-markdown-server/
 ├── LICENSE             # MIT License
 ├── README.md           # This file
 ├── content/            # Directory for markdown files
-│   └── index.md        # Sample homepage content
-└── static/             # Directory for static assets
+    ├── static/             # Directory for static assets
+│   ├── index.md        # Sample homepage content
     └── style.css       # CSS styling for HTML output
 ```
 

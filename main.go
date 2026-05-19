@@ -1,149 +1,150 @@
 package main
 
 import (
-	"fmt"
-	"html/template"
-	"log"
-	"net/http"
-	"os"
-	"path/filepath"
-	"strings"
-
-	"github.com/gomarkdown/markdown"
-	"github.com/gomarkdown/markdown/html"
-	"github.com/gomarkdown/markdown/parser"
+    "fmt"
+    "html/template"
+    "log"
+	"mime"
+    "net/http"
+    "os"
+    "path/filepath"
+    "strings"
+    "github.com/gomarkdown/markdown"
+    "github.com/gomarkdown/markdown/html"
+    "github.com/gomarkdown/markdown/parser"
 )
 
 type Server struct {
-	contentDir           string
-	port                string
-	enableSecurityHeaders bool
+    contentDir           string
+    port                string
+    enableSecurityHeaders bool
 }
 
 func NewServer(contentDir, port string, enableSecurityHeaders bool) *Server {
-	return &Server{
-		contentDir:           contentDir,
-		port:                port,
-		enableSecurityHeaders: enableSecurityHeaders,
-	}
+    return &Server{
+        contentDir:           contentDir,
+        port:                port,
+        enableSecurityHeaders: enableSecurityHeaders,
+    }
 }
 
 func (s *Server) Start() error {
-	http.HandleFunc("/", s.securityHeadersMiddleware(s.handleMarkdown))
-	
-	fmt.Printf("Starting server on port %s, serving content from %s\n", s.port, s.contentDir)
-	return http.ListenAndServe(":"+s.port, nil)
+	http.HandleFunc("/static/", s.securityHeadersMiddleware(s.handleStatic))
+    http.HandleFunc("/", s.securityHeadersMiddleware(s.handleMarkdown))
+    
+    fmt.Printf("Starting server on port %s, serving content from %s\n", s.port, s.contentDir)
+    return http.ListenAndServe(":"+s.port, nil)
 }
 
 // securityHeadersMiddleware adds security headers to all responses if enabled
 func (s *Server) securityHeadersMiddleware(next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		// Only add security headers if enabled
-		if s.enableSecurityHeaders {
-			w.Header().Set("X-Content-Type-Options", "nosniff")
-			w.Header().Set("X-XSS-Protection", "1; mode=block")
-			w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
-			w.Header().Set("X-Permitted-Cross-Domain-Policies", "none")
-			
-			// Content Security Policy - allowing iframe embedding as requested
-			// Note: Omitting X-Frame-Options since user wants iframe support
-			csp := "default-src 'self'; " +
-				"style-src 'self' 'unsafe-inline'; " +
-				"script-src 'self'; " +
-				"img-src 'self' data: https:; " +
-				"font-src 'self'; " +
-				"connect-src 'self'; " +
-				"frame-ancestors *; " + // Allow iframe embedding
-				"base-uri 'self'"
-			w.Header().Set("Content-Security-Policy", csp)
-		}
-		
-		// Call the next handler
-		next(w, r)
-	}
+    return func(w http.ResponseWriter, r *http.Request) {
+        // Only add security headers if enabled
+        if s.enableSecurityHeaders {
+            w.Header().Set("X-Content-Type-Options", "nosniff")
+            w.Header().Set("X-XSS-Protection", "1; mode=block")
+            w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
+            w.Header().Set("X-Permitted-Cross-Domain-Policies", "none")
+            
+            // Content Security Policy - allowing iframe embedding as requested
+            // Note: Omitting X-Frame-Options since user wants iframe support
+            csp := "default-src 'self'; " +
+                "style-src 'self' 'unsafe-inline'; " +
+                "script-src 'self'; " +
+                "img-src 'self' data: https:; " +
+                "font-src 'self'; " +
+                "connect-src 'self'; " +
+                "frame-ancestors *; " + // Allow iframe embedding
+                "base-uri 'self'"
+            w.Header().Set("Content-Security-Policy", csp)
+        }
+        
+        // Call the next handler
+        next(w, r)
+    }
 }
 
 func (s *Server) handleMarkdown(w http.ResponseWriter, r *http.Request) {
-	// Clean the URL path
-	urlPath := strings.TrimPrefix(r.URL.Path, "/")
-	if urlPath == "" {
-		urlPath = "index.md"
-	}
-	
-	// Security: Validate and sanitize the path to prevent directory traversal
-	if err := s.validatePath(urlPath); err != nil {
-		http.Error(w, "Invalid path", http.StatusBadRequest)
-		return
-	}
-	
-	// Handle CSS file requests
-	if urlPath == "style.css" {
-		cssPath := filepath.Join(s.contentDir, "style.css")
-		// Security: Ensure the resolved path is still within content directory
-		if !s.isPathSafe(cssPath) {
-			http.Error(w, "Invalid path", http.StatusBadRequest)
-			return
-		}
-		if _, err := os.Stat(cssPath); err == nil {
-			w.Header().Set("Content-Type", "text/css")
-			http.ServeFile(w, r, cssPath)
-			return
-		}
-		http.NotFound(w, r)
-		return
-	}
-	
-	// Add .md extension if not present and not a directory
-	if !strings.HasSuffix(urlPath, ".md") && !strings.HasSuffix(urlPath, "/") {
-		urlPath += ".md"
-	}
-	
-	filePath := filepath.Join(s.contentDir, urlPath)
-	
-	// Security: Ensure the resolved path is still within content directory
-	if !s.isPathSafe(filePath) {
-		http.Error(w, "Invalid path", http.StatusBadRequest)
-		return
-	}
-	
-	// Check if file exists
-	if _, err := os.Stat(filePath); os.IsNotExist(err) {
-		// Try with index.md if it's a directory
-		if strings.HasSuffix(urlPath, "/") {
-			indexPath := filepath.Join(s.contentDir, urlPath, "index.md")
-			if !s.isPathSafe(indexPath) {
-				http.Error(w, "Invalid path", http.StatusBadRequest)
-				return
-			}
-			filePath = indexPath
-		} else {
-			// If the requested file doesn't exist, try to serve index.md instead
-			indexPath := filepath.Join(s.contentDir, "index.md")
-			if !s.isPathSafe(indexPath) {
-				http.Error(w, "Invalid path", http.StatusBadRequest)
-				return
-			}
-			if _, indexErr := os.Stat(indexPath); indexErr == nil {
-				filePath = indexPath
-			} else {
-				http.NotFound(w, r)
-				return
-			}
-		}
-	}
-	
-	// Read markdown file
-	content, err := os.ReadFile(filePath)
-	if err != nil {
-		http.Error(w, "Error reading file", http.StatusInternalServerError)
-		return
-	}
-	
-	// Convert markdown to HTML
-	htmlContent := s.markdownToHTML(content)
-	
-	// Render with template
-	tmpl := `<!DOCTYPE html>
+    // Clean the URL path
+    urlPath := strings.TrimPrefix(r.URL.Path, "/")
+    if urlPath == "" {
+        urlPath = "index.md"
+    }
+    
+    // Security: Validate and sanitize the path to prevent directory traversal
+    if err := s.validatePath(urlPath); err != nil {
+        http.Error(w, "Invalid path", http.StatusBadRequest)
+        return
+    }
+    
+    // Handle CSS file requests
+    if urlPath == "style.css" {
+        cssPath := filepath.Join(s.contentDir, "style.css")
+        // Security: Ensure the resolved path is still within content directory
+        if !s.isPathSafe(cssPath) {
+            http.Error(w, "Invalid path", http.StatusBadRequest)
+            return
+        }
+        if _, err := os.Stat(cssPath); err == nil {
+            w.Header().Set("Content-Type", "text/css")
+            http.ServeFile(w, r, cssPath)
+            return
+        }
+        http.NotFound(w, r)
+        return
+    }
+    
+    // Add .md extension if not present and not a directory
+    if !strings.HasSuffix(urlPath, ".md") && !strings.HasSuffix(urlPath, "/") {
+        urlPath += ".md"
+    }
+    
+    filePath := filepath.Join(s.contentDir, urlPath)
+    
+    // Security: Ensure the resolved path is still within content directory
+    if !s.isPathSafe(filePath) {
+        http.Error(w, "Invalid path", http.StatusBadRequest)
+        return
+    }
+    
+    // Check if file exists
+    if _, err := os.Stat(filePath); os.IsNotExist(err) {
+        // Try with index.md if it's a directory
+        if strings.HasSuffix(urlPath, "/") {
+            indexPath := filepath.Join(s.contentDir, urlPath, "index.md")
+            if !s.isPathSafe(indexPath) {
+                http.Error(w, "Invalid path", http.StatusBadRequest)
+                return
+            }
+            filePath = indexPath
+        } else {
+            // If the requested file doesn't exist, try to serve index.md instead
+            indexPath := filepath.Join(s.contentDir, "index.md")
+            if !s.isPathSafe(indexPath) {
+                http.Error(w, "Invalid path", http.StatusBadRequest)
+                return
+            }
+            if _, indexErr := os.Stat(indexPath); indexErr == nil {
+                filePath = indexPath
+            } else {
+                http.NotFound(w, r)
+                return
+            }
+        }
+    }
+    
+    // Read markdown file
+    content, err := os.ReadFile(filePath)
+    if err != nil {
+        http.Error(w, "Error reading file", http.StatusInternalServerError)
+        return
+    }
+    
+    // Convert markdown to HTML
+    htmlContent := s.markdownToHTML(content)
+    
+    // Render with template
+    tmpl := `<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
@@ -162,79 +163,128 @@ func (s *Server) handleMarkdown(w http.ResponseWriter, r *http.Request) {
     </div>
 </body>
 </html>`
-	
-	t, err := template.New("page").Parse(tmpl)
-	if err != nil {
-		http.Error(w, "Template error", http.StatusInternalServerError)
-		return
-	}
-	
-	data := struct {
-		Title   string
-		Content template.HTML
-	}{
-		Title:   s.extractTitle(string(content)),
-		Content: template.HTML(htmlContent),
-	}
-	
-	w.Header().Set("Content-Type", "text/html")
-	if err := t.Execute(w, data); err != nil {
-		http.Error(w, "Template execution error", http.StatusInternalServerError)
-		return
-	}
+    
+    t, err := template.New("page").Parse(tmpl)
+    if err != nil {
+        http.Error(w, "Template error", http.StatusInternalServerError)
+        return
+    }
+    
+    data := struct {
+        Title   string
+        Content template.HTML
+    }{
+        Title:   s.extractTitle(string(content)),
+        Content: template.HTML(htmlContent),
+    }
+    
+    w.Header().Set("Content-Type", "text/html")
+    if err := t.Execute(w, data); err != nil {
+        http.Error(w, "Template execution error", http.StatusInternalServerError)
+        return
+    }
+}
+
+// handleStatic serves files from the contentDir/static directory under the /static/ URL path.
+// It enforces the same path-safety checks used elsewhere in the server.
+func (s *Server) handleStatic(w http.ResponseWriter, r *http.Request) {
+   const prefix = "/static/"
+   if !strings.HasPrefix(r.URL.Path, prefix) {
+       http.NotFound(w, r)
+       return
+   }
+
+   relPath := strings.TrimPrefix(r.URL.Path, prefix)
+   if relPath == "" {
+       // Do not allow directory listing at /static/
+       http.NotFound(w, r)
+       return
+   }
+
+   // Validate the relative path for obvious bad characters
+   if err := s.validatePath(relPath); err != nil {
+       http.Error(w, "Invalid path", http.StatusBadRequest)
+       return
+   }
+
+   // Build the filesystem path: <contentDir>/static/<relPath>
+   fsPath := filepath.Join(s.contentDir, "static", filepath.FromSlash(relPath))
+
+   // Ensure the resolved path is within the content directory
+   if !s.isPathSafe(fsPath) {
+       http.Error(w, "Invalid path", http.StatusBadRequest)
+       return
+   }
+
+   // Check file exists and is not a directory
+   fi, err := os.Stat(fsPath)
+   if err != nil || fi.IsDir() {
+       http.NotFound(w, r)
+       return
+   }
+
+   // Set Content-Type based on file extension (fallback to octet-stream)
+   if ext := filepath.Ext(fsPath); ext != "" {
+       if ctype := mime.TypeByExtension(ext); ctype != "" {
+           w.Header().Set("Content-Type", ctype)
+       }
+   }
+
+   // Serve the file using the standard library (this will handle range requests, etc.)
+   http.ServeFile(w, r, fsPath)
 }
 
 func (s *Server) markdownToHTML(md []byte) string {
-	// Create markdown parser with extensions
-	extensions := parser.CommonExtensions | parser.AutoHeadingIDs
-	p := parser.NewWithExtensions(extensions)
-	
-	// Create HTML renderer with options
-	htmlFlags := html.CommonFlags | html.HrefTargetBlank
-	opts := html.RendererOptions{Flags: htmlFlags}
-	renderer := html.NewRenderer(opts)
-	
-	// Parse and render
-	doc := p.Parse(md)
-	return string(markdown.Render(doc, renderer))
+    // Create markdown parser with extensions
+    extensions := parser.CommonExtensions | parser.AutoHeadingIDs
+    p := parser.NewWithExtensions(extensions)
+    
+    // Create HTML renderer with options
+    htmlFlags := html.CommonFlags | html.HrefTargetBlank
+    opts := html.RendererOptions{Flags: htmlFlags}
+    renderer := html.NewRenderer(opts)
+    
+    // Parse and render
+    doc := p.Parse(md)
+    return string(markdown.Render(doc, renderer))
 }
 
 func (s *Server) extractTitle(content string) string {
-	lines := strings.Split(content, "\n")
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "# ") {
-			return strings.TrimPrefix(line, "# ")
-		}
-	}
-	return "Markdown Server"
+    lines := strings.Split(content, "\n")
+    for _, line := range lines {
+        line = strings.TrimSpace(line)
+        if strings.HasPrefix(line, "# ") {
+            return strings.TrimPrefix(line, "# ")
+        }
+    }
+    return "Markdown Server"
 }
 
 func (s *Server) ensureSampleContent() error {
-	// Create sample index.md file if content directory is empty
-	if err := s.ensureIndexFile(); err != nil {
-		return err
-	}
-	
-	// Create style.css file if it doesn't exist
-	if err := s.ensureStyleFile(); err != nil {
-		return err
-	}
-	
-	return nil
+    // Create sample index.md file if content directory is empty
+    if err := s.ensureIndexFile(); err != nil {
+        return err
+    }
+    
+    // Create style.css file if it doesn't exist
+    if err := s.ensureStyleFile(); err != nil {
+        return err
+    }
+    
+    return nil
 }
 
 func (s *Server) ensureIndexFile() error {
-	// Check if content directory is empty
-	isEmpty, err := s.isContentDirEmpty()
-	if err != nil {
-		return err
-	}
-	
-	if isEmpty {
-		// Create sample index.md file
-		indexPath := filepath.Join(s.contentDir, "index.md")
-		sampleContent := `# Welcome to the Markdown Server
+    // Check if content directory is empty
+    isEmpty, err := s.isContentDirEmpty()
+    if err != nil {
+        return err
+    }
+    
+    if isEmpty {
+        // Create sample index.md file
+        indexPath := filepath.Join(s.contentDir, "index.md")
+        sampleContent := `# Welcome to the Markdown Server
 
 This is a sample markdown file that demonstrates the functionality of our Go-based markdown server.
 
@@ -279,20 +329,20 @@ Visit [GitHub](https://github.com) for more projects.
 *This server automatically converts this markdown to HTML!*
 `
 
-		if err := os.WriteFile(indexPath, []byte(sampleContent), 0644); err != nil {
-			return fmt.Errorf("failed to create sample index.md: %w", err)
-		}
-		
-		fmt.Printf("Created sample index.md file at %s\n", indexPath)
-	}
-	
-	return nil
+        if err := os.WriteFile(indexPath, []byte(sampleContent), 0644); err != nil {
+            return fmt.Errorf("failed to create sample index.md: %w", err)
+        }
+        
+        fmt.Printf("Created sample index.md file at %s\n", indexPath)
+    }
+    
+    return nil
 }
 
 func (s *Server) ensureStyleFile() error {
-	cssPath := filepath.Join(s.contentDir, "style.css")
-	if _, err := os.Stat(cssPath); os.IsNotExist(err) {
-		cssContent := `/* Reset and base styles */
+    cssPath := filepath.Join(s.contentDir, "style.css")
+    if _, err := os.Stat(cssPath); os.IsNotExist(err) {
+        cssContent := `/* Reset and base styles */
 * {
     margin: 0;
     padding: 0;
@@ -549,110 +599,110 @@ em {
     }
 }`
 
-		if err := os.WriteFile(cssPath, []byte(cssContent), 0644); err != nil {
-			return fmt.Errorf("failed to create sample style.css: %w", err)
-		}
-		
-		fmt.Printf("Created sample style.css file at %s\n", cssPath)
-	}
-	
-	return nil
+        if err := os.WriteFile(cssPath, []byte(cssContent), 0644); err != nil {
+            return fmt.Errorf("failed to create sample style.css: %w", err)
+        }
+        
+        fmt.Printf("Created sample style.css file at %s\n", cssPath)
+    }
+    
+    return nil
 }
 
 func (s *Server) isContentDirEmpty() (bool, error) {
-	entries, err := os.ReadDir(s.contentDir)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return true, nil
-		}
-		return false, err
-	}
-	
-	// Check if there are any .md files
-	for _, entry := range entries {
-		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".md") {
-			return false, nil
-		}
-	}
-	
-	return true, nil
+    entries, err := os.ReadDir(s.contentDir)
+    if err != nil {
+        if os.IsNotExist(err) {
+            return true, nil
+        }
+        return false, err
+    }
+    
+    // Check if there are any .md files
+    for _, entry := range entries {
+        if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".md") {
+            return false, nil
+        }
+    }
+    
+    return true, nil
 }
 
 // validatePath checks for obvious path traversal attempts
 func (s *Server) validatePath(path string) error {
-	// Check for path traversal patterns
-	if strings.Contains(path, "..") ||
-		strings.Contains(path, "//") ||
-		strings.HasPrefix(path, "/") ||
-		strings.Contains(path, "\\") {
-		return fmt.Errorf("invalid path: contains dangerous characters")
-	}
-	
-	// Only allow alphanumeric, dash, underscore, dot, and slash
-	for _, char := range path {
-		if !((char >= 'a' && char <= 'z') ||
-			(char >= 'A' && char <= 'Z') ||
-			(char >= '0' && char <= '9') ||
-			char == '-' || char == '_' || char == '.' || char == '/') {
-			return fmt.Errorf("invalid path: contains invalid characters")
-		}
-	}
-	
-	return nil
+    // Check for path traversal patterns
+    if strings.Contains(path, "..") ||
+        strings.Contains(path, "//") ||
+        strings.HasPrefix(path, "/") ||
+        strings.Contains(path, "\\") {
+        return fmt.Errorf("invalid path: contains dangerous characters")
+    }
+    
+    // Only allow alphanumeric, dash, underscore, dot, and slash
+    for _, char := range path {
+        if !((char >= 'a' && char <= 'z') ||
+            (char >= 'A' && char <= 'Z') ||
+            (char >= '0' && char <= '9') ||
+            char == '-' || char == '_' || char == '.' || char == '/') {
+            return fmt.Errorf("invalid path: contains invalid characters")
+        }
+    }
+    
+    return nil
 }
 
 // isPathSafe ensures the resolved path is within the content directory
 func (s *Server) isPathSafe(requestedPath string) bool {
-	// Get absolute paths
-	contentAbs, err := filepath.Abs(s.contentDir)
-	if err != nil {
-		return false
-	}
-	
-	requestedAbs, err := filepath.Abs(requestedPath)
-	if err != nil {
-		return false
-	}
-	
-	// Check if the requested path is within the content directory
-	rel, err := filepath.Rel(contentAbs, requestedAbs)
-	if err != nil {
-		return false
-	}
-	
-	// If the relative path starts with "..", it's outside the content directory
-	return !strings.HasPrefix(rel, "..")
+    // Get absolute paths
+    contentAbs, err := filepath.Abs(s.contentDir)
+    if err != nil {
+        return false
+    }
+    
+    requestedAbs, err := filepath.Abs(requestedPath)
+    if err != nil {
+        return false
+    }
+    
+    // Check if the requested path is within the content directory
+    rel, err := filepath.Rel(contentAbs, requestedAbs)
+    if err != nil {
+        return false
+    }
+    
+    // If the relative path starts with "..", it's outside the content directory
+    return !strings.HasPrefix(rel, "..")
 }
 
 func main() {
-	contentDir := os.Getenv("CONTENT_DIR")
-	if contentDir == "" {
-		contentDir = "./content"
-	}
-	
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = "8080"
-	}
-	
-	// Check if security headers should be enabled (default: enabled)
-	enableSecurityHeaders := true
-	if securityHeadersEnv := os.Getenv("HTTP_SECURITY_HEADERS"); securityHeadersEnv == "disable" {
-		enableSecurityHeaders = false
-		fmt.Println("HTTP security headers disabled")
-	}
-	
-	// Create content directory if it doesn't exist
-	if err := os.MkdirAll(contentDir, 0755); err != nil {
-		log.Fatal("Failed to create content directory:", err)
-	}
-	
-	server := NewServer(contentDir, port, enableSecurityHeaders)
-	
-	// Ensure sample content exists if directory is empty
-	if err := server.ensureSampleContent(); err != nil {
-		log.Printf("Warning: Failed to create sample content: %v", err)
-	}
-	
-	log.Fatal(server.Start())
+    contentDir := os.Getenv("CONTENT_DIR")
+    if contentDir == "" {
+        contentDir = "./content"
+    }
+    
+    port := os.Getenv("PORT")
+    if port == "" {
+        port = "8080"
+    }
+    
+    // Check if security headers should be enabled (default: enabled)
+    enableSecurityHeaders := true
+    if securityHeadersEnv := os.Getenv("HTTP_SECURITY_HEADERS"); securityHeadersEnv == "disable" {
+        enableSecurityHeaders = false
+        fmt.Println("HTTP security headers disabled")
+    }
+    
+    // Create content directory if it doesn't exist
+    if err := os.MkdirAll(contentDir, 0755); err != nil {
+        log.Fatal("Failed to create content directory:", err)
+    }
+    
+    server := NewServer(contentDir, port, enableSecurityHeaders)
+    
+    // Ensure sample content exists if directory is empty
+    if err := server.ensureSampleContent(); err != nil {
+        log.Printf("Warning: Failed to create sample content: %v", err)
+    }
+    
+    log.Fatal(server.Start())
 }
